@@ -1,0 +1,146 @@
+---
+title: "Prediction Assignment Writeup"
+author: "GERALDO"
+date: "2023-02-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Datos
+
+Los datos de entrenamiento para este proyecto están disponibles aquí:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+Los datos de prueba están disponibles aquí:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+```{r cars}
+# Descargue los conjuntos de datos de entrenamiento y prueba 
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv","training.csv",method = "curl")
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv","testing.csv",method = "curl")
+```
+
+## Análisis
+
+Primero, comenzamos exportando los datos. Uno puede simplemente descargar los conjuntos de datos de entrenamiento y prueba usado arriba.
+
+Luego, cargamos algunos paquetes útiles usando:
+
+```{r pressure, echo=FALSE}
+# Requerir los paquetes necesarios
+require(data.table)
+require(dplyr)
+require(caret)
+```
+
+Ahora vamos a cargar los datos en la memoria:
+
+```{r}
+# Cargue los conjuntos de datos de entrenamiento y prueba
+training <- as_tibble(fread("training.csv",na.strings=c('#DIV/0!', '', 'NA')))
+testing  <- as_tibble(fread("testing.csv",na.strings=c('#DIV/0!', '', 'NA')))
+```
+
+Ahora que tenemos los datos en la memoria, vayamos a la parte divertida. Lo primero que debemos hacer es dividir los datos de entrenamiento en dos partes. Usaremos el 70 % de estos datos para entrenar nuestro modelo y el 30 % restante para validarlo:
+
+
+```{r}
+# Ahora divida la capacitación en pruebas y validación reales
+set.seed(1234) # ¡No olvide la reproducibilidad!
+trainingDS <- createDataPartition( y = training$classe,
+                                   p = 0.7,
+                                   list = FALSE)
+actual.training <- training[trainingDS,]
+actual.validation <- training[-trainingDS,]
+```
+
+A continuación, debemos preparar los datos para el modelado. Si observa los datos de entrenamiento, verá que hay una serie de variables que no tienen variación o que tienen una gran fracción de valores faltantes. Estos realmente no nos ayudarán de ninguna manera significativa. Por lo tanto, vamos a limpiarlos para un modelado saludable:
+
+```{r}
+# Ahora limpia las variables con varianza cero
+# Tenga cuidado, elimine las mismas variables en ambos casos
+nzv <- nearZeroVar(actual.training)
+actual.training <- actual.training[,-nzv]
+actual.validation <- actual.validation[,-nzv]
+
+# Eliminar variables que son en su mayoría NA
+mostlyNA <- sapply(actual.training,function(x) mean(is.na(x))) > 0.95
+actual.training <- actual.training[,mostlyNA==FALSE]
+actual.validation <- actual.validation[,mostlyNA==FALSE]
+
+# En este punto ya hemos bajado a 59 variables de 160
+# Vea que las primeras 5 variables son identificadores que son
+# probablemente no sea útil para la predicción, así que deshazte de esos
+# Bajando el número total de variables a 54 (53 para predicción)
+actual.training <- actual.training[,-(1:5)]
+actual.validation <- actual.validation[,-(1:5)]
+```
+En este punto, tenemos datos limpios y saludables que podemos usar para construir modelos. Construiremos dos modelos: un bosque aleatorio y un modelo potenciado generalizado. Los entrenaremos en la parte de entrenamiento del conjunto de datos de entrenamiento original y luego los probaremos en la parte de validación del conjunto de datos de entrenamiento original:
+
+```{r}
+# Ahora construyamos un modelo de bosque aleatorio
+set.seed(1234)
+modelRF  <- train( classe ~.,
+                   data = actual.training,
+                   method = "rf",
+                   trControl = trainControl(method="cv",number=3) )
+# También se puede construir un modelo potenciado generalizado y comparar su precisión
+# al modelo de bosque aleatorio
+set.seed(1234)
+modelBM <- train( classe ~.,
+                  data = actual.training,
+                  method = "gbm",
+                  trControl = trainControl(method="repeatedcv",number = 5,repeats = 1),
+                  verbose = FALSE)
+```
+Luego, veamos qué tan bien funcionan estos dos modelos al predecir los valores en el conjunto de datos de validación. Esto se puede lograr fácilmente prediciendo los valores en el conjunto de validación y luego comparando las predicciones con los valores reales.
+
+
+```{r}
+# Ahora obtenga la predicción en la parte de validación y vea qué tan bien lo hacemos
+prediction.validation.rf <- predict(modelRF,actual.validation)
+#as.factor(actual.validation$classe)
+conf.matrix.rf <- confusionMatrix(prediction.validation.rf,as.factor(actual.validation$classe))
+print(conf.matrix.rf)
+```
+
+```{r}
+# Ahora obtenga la predicción en la parte de validación y vea qué tan bien lo hacemos
+prediction.validation.bm <- predict(modelBM,actual.validation)
+conf.matrix.bm <- confusionMatrix(prediction.validation.bm,as.factor(actual.validation$classe))
+print(conf.matrix.bm)
+```
+Podemos investigar un poco más nuestro modelo potenciado generalizado para ver qué variables tienen la mayor influencia relativa:
+
+```{r}
+# Imprimir el resumen de nuestro GBM
+print(summary(modelBM))
+```
+
+La lista anterior muestra la clasificación de las variables en nuestro GBM. Vemos que num_window, roll_belt y pitch_forearm son los de mayor rendimiento. Podemos ver algunas parcelas que demuestran su poder:
+
+```{r}
+qplot(num_window, roll_belt    , data = actual.training, col = classe)
+```
+
+```{r}
+qplot(num_window, pitch_forearm, data = actual.training, col = classe)
+```
+
+```{r}
+qplot(roll_belt , pitch_forearm, data = actual.training, col = classe)
+```
+
+En este punto, vemos que el bosque aleatorio tiene un rendimiento marginalmente mejor (Precisión: 0,998) que el modelo potenciado generalizado (Precisión: 0,9876). En realidad, podemos combinarlos o combinarlos, pero eso podría ser una exageración en este punto. En cualquier caso dan el mismo resultado. Probemos nuestro modelo en el conjunto de datos de prueba real:
+
+```{r}
+# Ahora obtenga la predicción en la parte de prueba y vea lo que obtenemos
+prediction.testing.rf <- predict(modelRF,testing)
+print(prediction.testing.rf)
+```
+
